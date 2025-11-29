@@ -1,55 +1,193 @@
-# Prerequisites
-*.d
+############################################
+## GLOBAL OS / EDITOR
+############################################
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
 
-# Object files
-*.o
-*.ko
-*.obj
-*.elf
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
-# Linker output
-*.ilk
-*.map
-*.exp
+# VSCode
+.vscode/
+.history/
 
-# Precompiled Headers
-*.gch
-*.pch
+# JetBrains
+.idea/
+*.iml
 
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
 
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
+############################################
+## PYTHON
+############################################
 
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
+# Bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# Virtual environments
+.env/
+.venv/
+env/
+venv/
+ENV/
+venv.bak/
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# Anaconda
+.conda/
+conda-meta/
+*.conda
+*.egg-info/
+*.egg
+*.eggs/
 
-# debug information files
-*.dwo
+# Jupyter Notebook
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# Pytest / Coverage
+.cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Build / Packaging
+build/
+dist/
+site/
+wheelhouse/
+pip-wheel-metadata/
+*.whl
+*.manifest
+*.spec
+
+# Logs
+*.log
+
+# Other Python tools
+.pyre/
+.pytype/
+ruff_cache/
+poetry.lock
+.poetry/
+.pdm-tmp/
+pdm.lock
+
+
+############################################
+## ELIXIR / ERLANG
+############################################
+
+# Build artifacts
+/_build/
+deps/
+erl_crash.dump
+*.beam
+
+# Mix
+/.elixir_ls/
+mix.lock
+
+# Releases
+rel/
+.release_cache/
+
+# Dialyzer
+.plt
+.plt.hash
+*.plt
+.dialyzer/
+
+
+############################################
+## JULIA
+############################################
+
+# Julia compiled files
+*.ji
+
+# Project-specific state
+_manifest/
+compiled/
+deps/build.log
+deps/downloads/
+deps/src/
+deps/usr/
+
+# Temporary / cache
+.julia/
+.julia/
+.julia_history
+.julia_backup
+
+# Pluto notebooks
+*.jl.tmp
+*.pluto.jl
+.pluto_backup/
+
+
+############################################
+## MATLAB
+############################################
+
+# Autosave / temp files
+*.asv
+*.m~
+*.mat~
+*.mlx.autosave
+
+# Binary outputs
+*.mex*
+*.slxc
+*.slx.autosave
+*.mdl.autosave
+*.autosave
+
+# Simulink cache / builds
+slprj/
+sccprj/
+coderassumptions/
+codegen/
+simulink_codegen/
+
+# Backup files
+*~
+
+# MATLAB project
+*.prj
+resources/
+
+# Parallel computing
+.parallel/
+
+# MATLAB Online
+MATLAB Drive/
+
+
+############################################
+## GENERIC LOGS, TEMP FILES
+############################################
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.orig
+*.lock
+*.pid
