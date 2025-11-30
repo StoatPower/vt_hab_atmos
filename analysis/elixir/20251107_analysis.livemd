@@ -1,0 +1,232 @@
+<!-- livebook:{"file_entries":[{"name":"launchData11-7-2025-started-6-46.csv","type":"attachment"}]} -->
+
+# VT HAB Nov 7 Launch
+
+```elixir
+Mix.install([
+  {:explorer, "~> 0.11.1"},
+  {:nx, "~> 0.10.0"},
+  {:exla, "~> 0.10.0"},
+  {:vega_lite, "~> 0.1.11"},
+  {:vega_lite_convert, "~> 1.0.1"},
+  {:kino_vega_lite, "~> 0.1.13"},
+  {:kino_explorer, "~> 0.1.25"},
+  {:tucan, "~> 0.5.1"}
+])
+
+alias Explorer.DataFrame, as: DF
+alias Explorer.Series, as: Series
+```
+
+## Import CSV as DataFrame
+
+```elixir
+path = 
+  [File.cwd!(), "/files/launchData11-7-2025-started-6-46.csv"]
+  |> Path.join()
+
+raw_df =
+  path
+  |> DF.from_csv!()
+  |> DF.rename(%{
+    "Press_Altitude(m)" => "pressure_alt_m",
+    "Pressure(hPa)" => "pressure_hpa",
+    "BME_Temp(C)" => "temp_bme_c",
+    "Humidity(%)" => "rh_percent",
+    "Gas(KOhms)" => "gas_kohm",
+    "TMP117_Temp(C)" => "temp_tmp_c",
+    "Battery_Voltage" => "battery_v",
+    "TimeSinceStart" => "elapsed_time_ms"
+  })
+```
+
+### Outline of Tasks
+
+We want to
+
+* identify time intervals for `ascent` and `descent`
+* identify altitudes corresponding to `troposphere`, `tropopause`, `stratosphere`
+* add timescales in `s`, `min`, and `hr`
+* convert pressure altitude to `km`
+* cross-check the pressure altitude with barometric formula
+* compute vertical velocity (ascent/descent rate) `m/s`
+* compare TMP117 vs BME680 temperature readings and difference
+* compute the environmental lapse rate (ELR): $\Gamma = - \frac{dT}{dz}$
+  * with both sensor temperatures
+  * compare vs each other
+  * compare with expected/standard rates
+* compute the dew point temperature: $T_d = \frac{b\gamma(T,RH)}{a-\gamma(T,RH)}$
+  * with both sensor temperatures
+  * compare vs each other
+* compute density from pressure & temperature $\rho = \frac{p}{RT}$
+  * with both sensor temperatures
+  * compare vs each other
+* battery voltage as a thermal proxy
+  * does it correlate with temperature, altitude, pressure
+
+#### Useful plots to consider
+
+**During ascent:**
+
+* temperature vs altitude
+* pressure vs altitude (sensor vs cross-checked calc)
+* humidity vs altitude
+* dew point vs altitude
+* ascent rate vs time
+* temperature diff (TMP117 - BME680) vs altitude
+* battery voltage vs altitude
+
+**During descent:**
+
+* oscillations in vertical velocity (turbulence)
+* cooling & rehetaing rate of payload
+
+<!-- livebook:{"break_markdown":true} -->
+
+### Convert time from ms to seconds, minutes, and hours
+
+```elixir
+df = 
+  raw_df
+  |> DF.put(:elapsed_time_s, Series.transform(raw_df[:elapsed_time_ms], 
+      fn t -> t/1.0E3 end))
+  |> DF.put(:elapsed_time_min, Series.transform(raw_df[:elapsed_time_ms], 
+      fn t -> t/6.0E4 end))
+  |> DF.put(:elapsed_time_hr, Series.transform(raw_df[:elapsed_time_ms], 
+      fn t -> t/3.6E6 end))
+```
+
+### Compute pressure height in kilometers
+
+```elixir
+df = DF.put(df, :pressure_alt_km, Series.transform(df[:pressure_alt_m], 
+  fn t -> t/1000 end))
+```
+
+### Compute vertical velocity (ascent/descent rate)
+
+```elixir
+safe_divide = fn num, den ->
+  zero? = Nx.equal(den, 0.0)
+
+  # avoid dividing by 0 at all: temporarily set den to 1.0 where it's 0,
+  # then overwrite those positions in the result with 0.0
+  den_safe =
+    Nx.select(
+      zero?,
+      Nx.broadcast(1.0, den),
+      den
+    )
+
+  raw = Nx.divide(num, den_safe)
+
+  Nx.select(
+    zero?,
+    Nx.broadcast(0.0, raw),
+    raw
+  )
+end
+
+non_uniform_finite_diff = fn x_series, y_series ->
+    xs = Series.to_tensor(x_series)
+    ys = Series.to_tensor(y_series)
+  
+    # boundary condition 1 at index 0
+    x1 = Nx.slice_along_axis(xs, 1, 1)
+    x0 = Nx.slice_along_axis(xs, 0, 1)
+    y1 = Nx.slice_along_axis(ys, 1, 1)
+    y0 = Nx.slice_along_axis(ys, 0, 1)
+    forward = safe_divide.(
+      Nx.subtract(y1, y0), 
+      Nx.subtract(x1, x0)
+    )
+      
+    # middle values
+    n = Nx.axis_size(ys, 0)
+    mid_len = n - 2
+    x_plus = Nx.slice_along_axis(xs, 2, mid_len)
+    x_minus = Nx.slice_along_axis(xs, 0, mid_len)
+    y_plus = Nx.slice_along_axis(ys, 2, mid_len)
+    y_minus = Nx.slice_along_axis(ys, 0, mid_len)
+    central = safe_divide.(
+      Nx.subtract(y_plus, y_minus), 
+      Nx.subtract(x_plus, x_minus)
+    )
+
+    # boundary condition 2
+    last_index = n - 1
+    xn = Nx.slice_along_axis(xs, last_index, 1)
+    xn_minus = Nx.slice_along_axis(xs, last_index - 1, 1)
+    yn = Nx.slice_along_axis(ys, last_index, 1)
+    yn_minus = Nx.slice_along_axis(ys, last_index - 1, 1)
+    backward = safe_divide.(
+      Nx.subtract(yn, yn_minus), 
+      Nx.subtract(xn, xn_minus)
+    )
+
+    Nx.concatenate([forward, central, backward], axis: 0)
+    |> Series.from_tensor()
+end
+
+df = DF.put(df, :vert_vel_mps, non_uniform_finite_diff.(
+  df[:elapsed_time_s],
+  df[:pressure_alt_m])
+)
+  
+```
+
+### Compute environmental lapse rate (temperature gradient)
+
+We will compute this with both the BME680 and TMP117 temperature readings.
+
+Note: The TMP117 is the more accurate sensor.
+
+```elixir
+df = DF.put(df, :elr_bme, Series.multiply(-1, non_uniform_finite_diff.(
+  df[:pressure_alt_km],
+  df[:temp_bme_c]))
+)
+
+df = DF.put(df, :elr_tmp, Series.multiply(-1, non_uniform_finite_diff.(
+  df[:pressure_alt_km],
+  df[:temp_tmp_c]))
+)
+
+```
+
+```elixir
+
+```
+
+<!-- livebook:{"attrs":"eyJjaGFydF90aXRsZSI6bnVsbCwiaGVpZ2h0Ijo2NDAsImxheWVycyI6W3siYWN0aXZlIjp0cnVlLCJjaGFydF90eXBlIjoibGluZSIsImNvbG9yX2ZpZWxkIjpudWxsLCJjb2xvcl9maWVsZF9hZ2dyZWdhdGUiOm51bGwsImNvbG9yX2ZpZWxkX2JpbiI6bnVsbCwiY29sb3JfZmllbGRfc2NhbGVfc2NoZW1lIjpudWxsLCJjb2xvcl9maWVsZF90eXBlIjpudWxsLCJkYXRhX3ZhcmlhYmxlIjoiZGYiLCJnZW9kYXRhX2NvbG9yIjoiYmx1ZSIsImxhdGl0dWRlX2ZpZWxkIjpudWxsLCJsb25naXR1ZGVfZmllbGQiOm51bGwsInhfZmllbGQiOiJlbGFwc2VkX3RpbWVfaHIiLCJ4X2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwieF9maWVsZF9iaW4iOm51bGwsInhfZmllbGRfc2NhbGVfdHlwZSI6bnVsbCwieF9maWVsZF90eXBlIjoicXVhbnRpdGF0aXZlIiwieV9maWVsZCI6InByZXNzdXJlX2FsdF9rbSIsInlfZmllbGRfYWdncmVnYXRlIjpudWxsLCJ5X2ZpZWxkX2JpbiI6bnVsbCwieV9maWVsZF9zY2FsZV90eXBlIjpudWxsLCJ5X2ZpZWxkX3R5cGUiOiJxdWFudGl0YXRpdmUifV0sInZsX2FsaWFzIjoiRWxpeGlyLlZlZ2FMaXRlIiwid2lkdGgiOjgwMH0","chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 800, height: 640)
+|> VegaLite.data_from_values(df, only: ["elapsed_time_hr", "pressure_alt_km"])
+|> VegaLite.mark(:line)
+|> VegaLite.encode_field(:x, "elapsed_time_hr", type: :quantitative)
+|> VegaLite.encode_field(:y, "pressure_alt_km", type: :quantitative)
+```
+
+<!-- livebook:{"attrs":"eyJjaGFydF90aXRsZSI6bnVsbCwiaGVpZ2h0Ijo2NDAsImxheWVycyI6W3siYWN0aXZlIjp0cnVlLCJjaGFydF90eXBlIjoibGluZSIsImNvbG9yX2ZpZWxkIjpudWxsLCJjb2xvcl9maWVsZF9hZ2dyZWdhdGUiOm51bGwsImNvbG9yX2ZpZWxkX2JpbiI6bnVsbCwiY29sb3JfZmllbGRfc2NhbGVfc2NoZW1lIjpudWxsLCJjb2xvcl9maWVsZF90eXBlIjpudWxsLCJkYXRhX3ZhcmlhYmxlIjoiZGYiLCJnZW9kYXRhX2NvbG9yIjoiYmx1ZSIsImxhdGl0dWRlX2ZpZWxkIjpudWxsLCJsb25naXR1ZGVfZmllbGQiOm51bGwsInhfZmllbGQiOiJlbGFwc2VkX3RpbWVfaHIiLCJ4X2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwieF9maWVsZF9iaW4iOm51bGwsInhfZmllbGRfc2NhbGVfdHlwZSI6bnVsbCwieF9maWVsZF90eXBlIjoicXVhbnRpdGF0aXZlIiwieV9maWVsZCI6InRlbXBfYm1lX2MiLCJ5X2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwieV9maWVsZF9iaW4iOm51bGwsInlfZmllbGRfc2NhbGVfdHlwZSI6bnVsbCwieV9maWVsZF90eXBlIjoicXVhbnRpdGF0aXZlIn0seyJhY3RpdmUiOnRydWUsImNoYXJ0X3R5cGUiOiJsaW5lIiwiY29sb3JfZmllbGQiOm51bGwsImNvbG9yX2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwiY29sb3JfZmllbGRfYmluIjpudWxsLCJjb2xvcl9maWVsZF9zY2FsZV9zY2hlbWUiOiJhY2NlbnQiLCJjb2xvcl9maWVsZF90eXBlIjpudWxsLCJkYXRhX3ZhcmlhYmxlIjoiZGYiLCJnZW9kYXRhX2NvbG9yIjoiYmx1ZSIsImxhdGl0dWRlX2ZpZWxkIjpudWxsLCJsb25naXR1ZGVfZmllbGQiOm51bGwsInhfZmllbGQiOiJlbGFwc2VkX3RpbWVfaHIiLCJ4X2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwieF9maWVsZF9iaW4iOm51bGwsInhfZmllbGRfc2NhbGVfdHlwZSI6bnVsbCwieF9maWVsZF90eXBlIjoicXVhbnRpdGF0aXZlIiwieV9maWVsZCI6InRlbXBfdG1wX2MiLCJ5X2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwieV9maWVsZF9iaW4iOm51bGwsInlfZmllbGRfc2NhbGVfdHlwZSI6bnVsbCwieV9maWVsZF90eXBlIjoicXVhbnRpdGF0aXZlIn1dLCJ2bF9hbGlhcyI6IkVsaXhpci5WZWdhTGl0ZSIsIndpZHRoIjo4MDB9","chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 800, height: 640)
+|> VegaLite.data_from_values(df, only: ["elapsed_time_hr", "temp_bme_c", "temp_tmp_c"])
+|> VegaLite.layers([
+  VegaLite.new()
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:x, "elapsed_time_hr", type: :quantitative)
+  |> VegaLite.encode_field(:y, "temp_bme_c", type: :quantitative),
+  VegaLite.new()
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:x, "elapsed_time_hr", type: :quantitative)
+  |> VegaLite.encode_field(:y, "temp_tmp_c", type: :quantitative)
+])
+```
+
+<!-- livebook:{"attrs":"eyJjaGFydF90aXRsZSI6bnVsbCwiaGVpZ2h0Ijo2NDAsImxheWVycyI6W3siYWN0aXZlIjp0cnVlLCJjaGFydF90eXBlIjoibGluZSIsImNvbG9yX2ZpZWxkIjpudWxsLCJjb2xvcl9maWVsZF9hZ2dyZWdhdGUiOm51bGwsImNvbG9yX2ZpZWxkX2JpbiI6bnVsbCwiY29sb3JfZmllbGRfc2NhbGVfc2NoZW1lIjpudWxsLCJjb2xvcl9maWVsZF90eXBlIjpudWxsLCJkYXRhX3ZhcmlhYmxlIjoiZGYiLCJnZW9kYXRhX2NvbG9yIjoiYmx1ZSIsImxhdGl0dWRlX2ZpZWxkIjpudWxsLCJsb25naXR1ZGVfZmllbGQiOm51bGwsInhfZmllbGQiOm51bGwsInhfZmllbGRfYWdncmVnYXRlIjpudWxsLCJ4X2ZpZWxkX2JpbiI6bnVsbCwieF9maWVsZF9zY2FsZV90eXBlIjpudWxsLCJ4X2ZpZWxkX3R5cGUiOm51bGwsInlfZmllbGQiOm51bGwsInlfZmllbGRfYWdncmVnYXRlIjpudWxsLCJ5X2ZpZWxkX2JpbiI6bnVsbCwieV9maWVsZF9zY2FsZV90eXBlIjpudWxsLCJ5X2ZpZWxkX3R5cGUiOm51bGx9XSwidmxfYWxpYXMiOiJFbGl4aXIuVmVnYUxpdGUiLCJ3aWR0aCI6ODAwfQ","chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+
+```
